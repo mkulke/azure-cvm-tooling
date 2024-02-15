@@ -129,7 +129,23 @@ pub struct Quote {
     pcrs: Vec<Vec<u8>>,
 }
 
+fn pad<const T: usize>(input: &[u8]) -> [u8; T] {
+    let mut output = [0; T];
+    let len = input.len();
+    if len > T {
+        output.copy_from_slice(&input[..T]);
+    } else {
+        output[..len].copy_from_slice(input);
+    }
+    output
+}
+
 impl Quote {
+    /// Retrieve sha256 PCR values from a Quote
+    pub fn pcrs_sha256(&self) -> Vec<[u8; 32]> {
+        self.pcrs.iter().map(|x| pad(x)).collect()
+    }
+
     /// Extract nonce from a Quote
     pub fn nonce(&self) -> Result<Vec<u8>, QuoteError> {
         let attest = Attest::unmarshall(&self.message)?;
@@ -201,4 +217,19 @@ pub fn get_quote(data: &[u8]) -> Result<Quote, QuoteError> {
         message,
         pcrs,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pcr_sha256() {
+        let quote_bytes = include_bytes!("../../test/quote.bin");
+        let quote: Quote = bincode::deserialize(quote_bytes).unwrap();
+        // convert Vec of fixed byte array to Vec of Vec<u8>
+        let pcrs_sha256: Vec<Vec<u8>> = quote.pcrs_sha256().iter().map(|p| p.to_vec()).collect();
+        assert_eq!(pcrs_sha256.len(), 24);
+        assert_eq!(pcrs_sha256, quote.pcrs);
+    }
 }
