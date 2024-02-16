@@ -17,7 +17,7 @@ path = "src/main.rs"
 required-features = ["attester", "verifier"]
 
 [dependencies]
-az-cvm-vtpm = { path = "..", version = "0.5.2" }
+az-cvm-vtpm = { path = ".." }
 bincode.workspace = true
 clap.workspace = true
 openssl = { workspace = true, optional = true }
