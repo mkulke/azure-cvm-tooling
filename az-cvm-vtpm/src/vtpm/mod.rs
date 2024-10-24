@@ -3,19 +3,19 @@
 
 use core::time::Duration;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::thread;
 use thiserror::Error;
 use tss_esapi::abstraction::{nv, pcr, public::DecodedKey};
 use tss_esapi::attributes::NvIndexAttributesBuilder;
-use tss_esapi::handles::{NvIndexTpmHandle, PcrHandle, TpmHandle};
+use tss_esapi::handles::{NvIndexHandle, NvIndexTpmHandle, PcrHandle, TpmHandle};
 use tss_esapi::interface_types::algorithm::HashingAlgorithm;
-use tss_esapi::interface_types::resource_handles::NvAuth;
+use tss_esapi::interface_types::resource_handles::{NvAuth, Provision};
 use tss_esapi::interface_types::session_handles::AuthSession;
 use tss_esapi::structures::pcr_selection_list::PcrSelectionListBuilder;
 use tss_esapi::structures::pcr_slot::PcrSlot;
 use tss_esapi::structures::{
-    Attest, AttestInfo, Data, DigestValues, NvPublicBuilder, Signature, SignatureScheme,
+    Attest, AttestInfo, Data, DigestValues, MaxNvBuffer, NvPublicBuilder, Signature,
+    SignatureScheme,
 };
 use tss_esapi::tcti_ldr::{DeviceConfig, TctiNameConf};
 use tss_esapi::traits::{Marshall, UnMarshall};
@@ -119,7 +119,6 @@ pub fn get_report_with_report_data(report_data: &[u8]) -> Result<Vec<u8>, Report
 }
 
 fn get_session_context() -> Result<(NvIndexTpmHandle, Context), ReportError> {
-    use tss_esapi::handles::NvIndexTpmHandle;
     let nv_index = NvIndexTpmHandle::new(VTPM_HCL_REPORT_NV_INDEX)?;
 
     let conf: TctiNameConf = TctiNameConf::Device(DeviceConfig::default());
@@ -129,40 +128,92 @@ fn get_session_context() -> Result<(NvIndexTpmHandle, Context), ReportError> {
     Ok((nv_index, context))
 }
 
-fn write_nv_index(
-    context: &mut Context,
+enum NvSearchResult {
+    Found,
+    NotFound,
+    SizeMismatch,
+}
+
+fn find_index<'a>(
+    context: &'a mut Context,
     nv_index: NvIndexTpmHandle,
-    data: &[u8],
+    len: usize,
+) -> Result<NvSearchResult, ReportError> {
+    let list = nv::list(context)?;
+    let result = list
+        .iter()
+        .find(|(public, _)| public.nv_index() == nv_index);
+    let Some((public, _)) = result else {
+        return Ok(NvSearchResult::NotFound);
+    };
+    if public.data_size() != len {
+        return Ok(NvSearchResult::SizeMismatch);
+    }
+
+    Ok(NvSearchResult::Found)
+}
+
+fn create_index(
+    context: &mut Context,
+    handle: NvIndexTpmHandle,
+    len: usize,
 ) -> Result<(), ReportError> {
-    let owner_nv_index_attributes = NvIndexAttributesBuilder::new()
+    let attributes = NvIndexAttributesBuilder::new()
         .with_owner_write(true)
         .with_owner_read(true)
-        .with_pp_read(true)
         .build()?;
 
-    let owner_nv_public = NvPublicBuilder::new()
-        .with_nv_index(nv_index)
+    let owner = NvPublicBuilder::new()
+        .with_nv_index(handle.clone())
         .with_index_name_algorithm(HashingAlgorithm::Sha256)
-        .with_index_attributes(owner_nv_index_attributes)
-        .with_data_area_size(data.len())
+        .with_index_attributes(attributes)
+        .with_data_area_size(len)
         .build()?;
 
-    let mut rw = match nv::list(context)?
-        .iter()
-        .find(|(public, _)| public.nv_index() == nv_index)
-    {
-        Some(_) => nv::NvOpenOptions::ExistingIndex {
-            nv_index_handle: nv_index,
-            auth_handle: NvAuth::Owner,
-        },
-        None => nv::NvOpenOptions::NewIndex {
-            nv_public: owner_nv_public,
-            auth_handle: NvAuth::Owner,
-        },
-    }
-    .open(context)?;
+    let _ = context.nv_define_space(Provision::Owner, None, owner)?;
+    Ok(())
+}
 
-    rw.write_all(data).map_err(|_| ReportError::NvWriteFailed)
+fn delete_index(context: &mut Context, handle: NvIndexTpmHandle) -> Result<(), ReportError> {
+    let object_handle = context
+        .tr_from_tpm_public(handle.into())
+        .map(NvIndexHandle::from)?;
+    context.nv_undefine_space(Provision::Owner, object_handle)?;
+    Ok(())
+}
+
+fn write_to_handle(
+    context: &mut Context,
+    handle: NvIndexTpmHandle,
+    data: &[u8],
+) -> Result<(), ReportError> {
+    let buffer = MaxNvBuffer::try_from(data)?;
+    let object_handle = context
+        .tr_from_tpm_public(handle.into())
+        .map(NvIndexHandle::from)?;
+    context.nv_write(NvAuth::Owner, object_handle, buffer, 0)?;
+    Ok(())
+}
+
+fn write_nv_index(
+    context: &mut Context,
+    handle: NvIndexTpmHandle,
+    data: &[u8],
+) -> Result<(), ReportError> {
+    let result = find_index(context, handle, data.len())?;
+    match result {
+        NvSearchResult::Found => write_to_handle(context, handle, data)?,
+        NvSearchResult::NotFound => {
+            create_index(context, handle, data.len())?;
+            write_to_handle(context, handle, data)?;
+        }
+        NvSearchResult::SizeMismatch => {
+            delete_index(context, handle)?;
+            create_index(context, handle, data.len())?;
+            write_to_handle(context, handle, data)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Error, Debug)]
