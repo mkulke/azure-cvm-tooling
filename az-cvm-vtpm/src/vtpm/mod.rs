@@ -128,6 +128,7 @@ fn get_session_context() -> Result<(NvIndexTpmHandle, Context), ReportError> {
     Ok((nv_index, context))
 }
 
+#[derive(Debug)]
 enum NvSearchResult {
     Found,
     NotFound,
@@ -201,6 +202,7 @@ fn write_nv_index(
     data: &[u8],
 ) -> Result<(), ReportError> {
     let result = find_index(context, handle, data.len())?;
+    println!("Found index: {:?}", result);
     match result {
         NvSearchResult::Found => write_to_handle(context, handle, data)?,
         NvSearchResult::NotFound => {
